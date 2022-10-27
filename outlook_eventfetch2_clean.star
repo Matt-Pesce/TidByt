@@ -56,8 +56,9 @@ TENANT_ID_HASH = "ABCDEFG123456789"
 # The endpoint URL
 # Note the Client Secret expires on 4/26/2023
 # Secrets are hardcoded here for debug with Pixlet "Serve" mode, then replaced with Tidbyt Secrets for production code. 
-# <for debug, paste the 3 secrets here>
-
+#MSFT_CLIENT_SECRET = "alpha"
+#MSFT_CLIENT_ID = "beta"
+#MSFT_TENANT_ID = "omega"
 
 # Production Code - runs in the Tidbyt production environment.  In Deubg mode with Serve need to hard code valid ID, Tenant ID and SECRET here instead (since HASHes above are only valid in production env
 MSFT_CLIENT_ID = secret.decrypt(CLIENT_ID_HASH)
@@ -122,8 +123,9 @@ def main(config):
     calendar_start_time = time.from_timestamp(beginning_of_the_week_epoch).format(RFC3339_FORMAT)
     calendar_end_time = time.from_timestamp(end_of_the_week_epoch).format(RFC3339_FORMAT)
 
-    print(calendar_start_time)
-    print(calendar_end_time)
+    if DEBUG_ON:
+        print(calendar_start_time)
+        print(calendar_end_time)
 
     outlook_event_url = OUTLOOK_CALENDAR_VIEW_URL + "&startdatetime=" + calendar_start_time + "&enddatetime=" + calendar_end_time
 
@@ -144,11 +146,15 @@ def main(config):
         OUTLOOK_ACCESS_TOKEN = cache.get(outlook_refresh_token) 
 
     if not OUTLOOK_ACCESS_TOKEN:
-        print("Refreshing Outlook Access Token")
-
+        
         refresh_body = "refresh_token=" + outlook_refresh_token + "&redirect_uri=http://127.0.0.1:8080/oauth-callback" + "&client_id=" + client_id + "&client_secret=" +client_secret + "&grant_type=refresh_token" + "&scope=Calendars.read"
-        curl_cmd = "curl -s --request POST --data \"" + refresh_body + "\" " + msft_token_endpoint
-        print(curl_cmd)
+        
+        # CURL can be handy for debug ops from the Linux command line
+        
+        if DEBUG_ON:
+            print("Refreshing Outlook Access Token")
+            curl_cmd = "curl -s --request POST --data \"" + refresh_body + "\" " + msft_token_endpoint
+            print(curl_cmd)
 
         MSFT_GRAPH_POST_HEADERS = {"Content-Type": "application/x-www-form-urlencoded"
         }
@@ -157,6 +163,7 @@ def main(config):
 
         if refresh.status_code != 200:
              fail("Refresh of Access Token failed with Status Code: %d - %s" % (refresh.status_code, refresh.body()))
+
         # Grab new Oauthtoken from the Google Token service, format for Data Aggregation API call.
         OUTLOOK_ACCESS_TOKEN = "Bearer {}".format(refresh.json()["access_token"])
         cache.set(outlook_refresh_token, OUTLOOK_ACCESS_TOKEN, ttl_seconds = int(refresh.json()["expires_in"] - 30))
@@ -187,9 +194,6 @@ def main(config):
 
         # Get the first Batch of events
 
-        # ISSUE with the current query - it picks up events and reminders from other calendars.  For example "Vacation Day" from CTO staff.
-        # Is there a way to tune the query to only pick up actual meetings?   Hm....may have to filter out Subject lines ("subject" index) or perhaps there are more fields that can be added to the query to 
-        # filter out these types of events.
         # Also, MSFT generated "Focus Time" shows as 1 attendee, where as MF + Rachel entered morning prep, coding/training shows up as 0 attendees.   Hm.....may need to specifically filter on "Focus Time", dont count as a meeting.
         # Same for "meetings" with Zero attendees. 
 
@@ -211,7 +215,6 @@ def main(config):
             # This expression returns timestamps, easier to do math with these.   Again struggling a bit with the time "types"
 
             meeting_duration = time.parse_time(end_time).unix - time.parse_time(start_time).unix
-#            total_meeting_duration = total_meeting_duration + (meeting_duration/3600)
 
             if DEBUG_ON:
                 print("Event #: %d" % total_event_num)
@@ -221,8 +224,7 @@ def main(config):
                 print(meeting_duration)
                 print(is_cancelled)
         
-            #        if CalendarQuery.json()["value"][meeting_num]["attendees"]:
-            #            attendee = CalendarQuery.json()["value"][meeting_num]["attendees"][attendee_num]["emailAddress"]["name"]
+            # Count the attendees for each event (+ optional code for tracking attendee details)
             attendee_num = 0
             for attendee_count in CalendarQuery.json()["value"][meeting_num]["attendees"]:
                 # Can simplify this?   ie if specific attendee names arent required, just delete the line of code below (assignment of attendee)
@@ -230,7 +232,8 @@ def main(config):
 #               print("Attendee: %s" % attendee)
                 attendee_num=attendee_num + 1
         
-            print("Attendee Count: %d" % attendee_num)
+            if DEBUG_ON:
+                print("Attendee Count: %d" % attendee_num)
 
             # Only count as a "Meeting" if attendee count is two or more
             # Also, filter out "All Day" events that come across as 24 hour meeting invites
@@ -268,11 +271,12 @@ def main(config):
             break
 
 
-    # Now for the Fun Part - Display the Output to Tidbyt
+    # Now for the Fun Part - Display the Output to Tidbyt.
+    # Color code the stats.....turn yellow/red when they exceed desired thresholds.
     
     # Format the numbers so that 2 decimal places are shown (0.50 for 30mins, 0.25 for 15 mins)
-    format_total_meeting_duration = humanize.float("###.##", total_meeting_duration)
-    format_total_big_meeting_duration = humanize.float("###.##", total_big_meeting_duration)
+    format_total_meeting_duration = humanize.float("###.##", float(total_meeting_duration))
+    format_total_big_meeting_duration = humanize.float("###.##", float(total_big_meeting_duration))
 
     if total_meeting_duration < 21:
         meeting_duration_color = Green
@@ -355,9 +359,15 @@ def main(config):
 
 def oauth_handler(params):
 
-    print("Running Handler")
+    # This handler is invoked once the user selects the "Authorize my Outlook Acccount" from the Mobile app
+    # It passes Params from a successful user Auth, including the Code that must be exchanged for a Refresh token
+
+    if DEBUG_ON:
+        print("Running Handler")
+        #print(params)
+
     params = json.decode(params)
-#    print(params)
+
     # Deconstructing params for now since there isn't much/any debug info that comes from Schema.Oauth failures.
     # This makes things easier to debug when something goes wrong in Schema user Auth sequence.
 	
@@ -366,52 +376,32 @@ def oauth_handler(params):
     auth_grant_type = params["grant_type"]
     auth_redirect_uri = params["redirect_uri"]
     auth_scope = "offline_access%20Calendars.read"
-    auth_client_secret = MSFT_CLIENT_SECRET
-#    auth_client_secret = GOOGLE_CLIENT_SECRET or CLIENT_SECRET_DEFAULT
-
+    auth_client_secret = MSFT_CLIENT_SECRET or CLIENT_SECRET_DEFAULT # Keep run time env happy, it barfs on NULL values in Render Mode
 	
     # Re-assemble the Auth Body with a series of parameters that I know work for Google Oauth
     auth_body = "&code=" + auth_code + "&redirect_uri=" +auth_redirect_uri + "&client_id=" + auth_client_id + "&client_secret=" +auth_client_secret + "&grant_type=" + auth_grant_type + "&scope=" + auth_scope
 
-#    auth_body = "&grant_type=" + auth_grant_type
-
- 
-#    url_body_combo = msft_token_endpoint + " "
-
-  
     #This is a handy debug tool.   Prints out a 1-liner curl command that can be cut and pasted into the terminal
-    if (DEBUG_ON):
+    if DEBUG_ON:
         curl_cmd = "curl -s --request POST --data \"" + auth_body + "\" " + MSFT_EVENTFETCH_TOKEN_ENDPOINT
         print(curl_cmd)
     print("Hello World 0")	
+
     # Exchange parameters and client secret for an access token
     MSFTAUTH_POST_HEADERS = {"Content-type": "application/x-www-form-urlencoded",
     }
-#    res = http.post(url="http://127.0.0.1:8866",body=auth_body,headers=MSFTAUTH_POST_HEADERS)
     res = http.post(url=MSFT_EVENTFETCH_TOKEN_ENDPOINT,body=auth_body)
-
-#     res = http.post(msft_token_endpoint)
-#    res = http.post(
-#        url = msft_token_endpoint,
-#        headers = MSFTAUTH_POST_HEADERS,
-#        form_body = dict(
-#            params,f
-#            client_secret = MSFT_CLIENT_SECRET,
-#            scope = auth_scope
-#        ),
-#    )
-    print("Hello World 1")
 
     if res.status_code != 200:
         fail("token request failed with status code: %d - %s" %
         (res.status_code, res.body()))
 
+
     # Grab the refresh token from the Oauth response - Cache the Access token (at present they are good for 1 hour)
+    # Set cache to expire 30 seconds early to prvide a small time buffer.
 
     token_params = res.json()
     refresh_token = token_params["refresh_token"]
-
-    print(token_params["expires_in"])
 
     cache.set(refresh_token, "Bearer " + token_params["access_token"], ttl_seconds = int(token_params["expires_in"] - 30))
 
@@ -419,10 +409,8 @@ def oauth_handler(params):
 
 def get_schema():
 	
-    # Note below that in order to return a refresh token, Google Oauth requires the parameter "access_type" to be set to "offline"
-    # The Default setting is "online" - so slipping this parameter via client_id.
-    # It cannot be done via the authorization_endpoint because the Auth sequence running behind the scenes inserts a "?" after 
-    # The authorization_endpoint causing syntax errors with the Google Oauth endpoint.
+    # Note below that in order to return a refresh token, MSFT Graph requires the parameter offline_access to be provided
+    # This needs to be passed as part of the Scope paramater.
 
     return schema.Schema(
         version = "1",
@@ -433,8 +421,7 @@ def get_schema():
     		desc = "Authorize your Microsoft Outlook Calendar",
     		icon = "windows",
     		handler = oauth_handler,
- 		client_id = (MSFT_CLIENT_ID or CLIENT_ID_DEFAULT),		
-# 		client_id = (GOOGLE_CLIENT_ID or CLIENT_ID_DEFAULT) + "&access_type=offline",		
+ 		    client_id = (MSFT_CLIENT_ID or CLIENT_ID_DEFAULT),		
     		authorization_endpoint = MSFT_EVENTFETCH_AUTH_ENDPOINT,
                 scopes = [
                     "offline_access%20Calendars.read",
